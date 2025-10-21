@@ -30,7 +30,7 @@ async def ingest(job: DatasetJob) -> None:
     def _run_ingest():
         to_analyze: list[EntityProxy] = []
         to_index: list[EntityProxy] = []
-        manager = Manager(sync_app, job.dataset, job.context)
+        manager = Manager(app, job.dataset, job.context)
 
         try:
             for entity in job.get_entities():
