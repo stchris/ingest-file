@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import logging
 from pathlib import Path
@@ -7,7 +8,7 @@ from followthemoney.proxy import EntityProxy
 from openaleph_procrastinate import defer
 from openaleph_procrastinate.app import make_app
 from openaleph_procrastinate.model import DatasetJob
-from openaleph_procrastinate.tasks import task
+from openaleph_procrastinate.tasks import async_task
 from prometheus_client import Info
 from servicelayer.archive.util import ensure_path
 
@@ -24,28 +25,38 @@ sync_app = make_app(__loader__.name, sync=True)
 log = logging.getLogger(__name__)
 
 
-@task(app=app)
-def ingest(job: DatasetJob) -> None:
-    to_analyze: list[EntityProxy] = []
-    to_index: list[EntityProxy] = []
-    manager = Manager(sync_app, job.dataset, job.context)
+@async_task(app=app)
+async def ingest(job: DatasetJob) -> None:
+    def _run_ingest():
+        to_analyze: list[EntityProxy] = []
+        to_index: list[EntityProxy] = []
+        manager = Manager(sync_app, job.dataset, job.context)
 
-    try:
-        for entity in job.get_entities():
-            job.log.debug(
-                f"Ingesting `{entity.first("contentHash")}`", entity=entity.to_dict()
-            )
-            manager.ingest_entity(entity)
-    finally:
-        manager.close()
+        try:
+            for entity in job.get_entities():
+                job.log.debug(
+                    f"Ingesting `{entity.first("contentHash")}`",
+                    entity=entity.to_dict(),
+                )
+                manager.ingest_entity(entity)
+        finally:
+            manager.close()
 
-    for entity in manager.iterate_emitted():
-        if entity.schema.is_a("Analyzable"):
-            to_analyze.append(entity)
+        for entity in manager.iterate_emitted():
+            if entity.schema.is_a("Analyzable"):
+                to_analyze.append(entity)
 
-        to_index.append(entity)
+            to_index.append(entity)
 
-    job.log.info(f"Emitted {len(manager.emitted)} entities.", emitted=manager.emitted)
+        job.log.info(
+            f"Emitted {len(manager.emitted)} entities.", emitted=manager.emitted
+        )
+
+        return to_analyze, to_index
+
+    # Run blocking Manager operations in thread pool
+    to_analyze, to_index = await asyncio.to_thread(_run_ingest)
+
     if to_analyze:
         defer.analyze(app, job.dataset, to_analyze, batch=job.batch, **job.context)
     if to_index:
